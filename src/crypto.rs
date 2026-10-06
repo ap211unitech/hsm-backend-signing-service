@@ -7,7 +7,12 @@ use cryptoki::object::{Attribute, KeyType, ObjectClass};
 use cryptoki::session::{Session, UserType};
 use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
+use p256::ecdsa::{Signature, SigningKey, signature::SignerMut};
+use rand_core::OsRng;
+use std::sync::Mutex;
 use tracing::{error, info};
+
+pub const KEY_LABEL: &str = "arkion-intermediate-prod";
 
 #[async_trait]
 pub trait Signer: Send + Sync {
@@ -57,18 +62,16 @@ impl HsmSessionPool {
             .login(UserType::User, Some(&AuthPin::new(pin.into())))
             .unwrap_or(());
 
-        let key_label = "arkion-intermediate-prod";
-
         // 1. Provision non-exportable ECDSA Key Pair
         if session
-            .find_objects(&[Attribute::Label(key_label.into())])
+            .find_objects(&[Attribute::Label(KEY_LABEL.into())])
             .unwrap()
             .is_empty()
         {
             let pub_template = vec![
                 Attribute::Token(true),
                 Attribute::Verify(true),
-                Attribute::Label(key_label.into()),
+                Attribute::Label(KEY_LABEL.into()),
                 Attribute::EcParams(vec![
                     0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
                 ]), // secp256r1
@@ -78,7 +81,7 @@ impl HsmSessionPool {
                 Attribute::Private(true),
                 Attribute::Sign(true),
                 Attribute::Extractable(false),
-                Attribute::Label(key_label.into()),
+                Attribute::Label(KEY_LABEL.into()),
             ];
             session
                 .generate_key_pair(&Mechanism::EccKeyPairGen, &pub_template, &priv_template)
@@ -168,23 +171,42 @@ impl Signer for HsmSessionPool {
 }
 
 // Mock implementation for clean substitution
-pub struct MockSigner;
+pub struct MockSigner {
+    signing_key: Mutex<SigningKey>,
+}
 
-#[async_trait]
-impl Signer for MockSigner {
-    async fn sign(&self, _key_id: &str, _payload: &[u8]) -> Result<Vec<u8>, AppError> {
-        Ok(vec![0x30, 0x44, 0x02, 0x20, 0x7a]) // Mock DER sequence
+impl MockSigner {
+    pub fn new() -> Self {
+        Self {
+            signing_key: Mutex::new(SigningKey::random(&mut OsRng)),
+        }
+    }
+
+    pub fn public_key(&self) -> Vec<u8> {
+        self.signing_key
+            .lock()
+            .unwrap()
+            .verifying_key()
+            .to_sec1_bytes()
+            .to_vec()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl Default for MockSigner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-    #[tokio::test]
-    async fn test_mock_signer() {
-        let signer = MockSigner;
-        let sig = signer.sign("test-key", b"payload").await.unwrap();
-        assert_eq!(sig.len(), 5);
+#[async_trait]
+impl Signer for MockSigner {
+    async fn sign(&self, key_id: &str, payload: &[u8]) -> Result<Vec<u8>, AppError> {
+        if key_id != KEY_LABEL {
+            return Err(AppError::KeyNotFound);
+        }
+
+        let mut guard = self.signing_key.lock().unwrap();
+        let signature: Signature = guard.sign(payload);
+        Ok(signature.to_der().as_bytes().to_vec())
     }
 }

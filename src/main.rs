@@ -1,62 +1,13 @@
 mod crypto;
 mod error;
+mod routes;
 
-use axum::routing::get;
-use axum::{Json, Router, extract::State, routing::post};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
-use crypto::{HsmSessionPool, Signer};
-use serde::{Deserialize, Serialize};
 use std::env;
 use std::sync::Arc;
-use std::time::Instant;
 use tracing::info;
 
-#[derive(Deserialize)]
-struct SignRequest {
-    key_id: String,
-    algorithm: String,
-    payload: String,
-}
-
-#[derive(Serialize)]
-struct SignResponse {
-    key_id: String,
-    algorithm: String,
-    signature: String,
-    duration_ms: u64,
-}
-
-type AppState = Arc<dyn Signer>;
-
-async fn sign_handler(
-    State(signer): State<AppState>,
-    Json(req): Json<SignRequest>,
-) -> Result<Json<SignResponse>, error::AppError> {
-    let start = Instant::now();
-
-    if req.algorithm != "ECDSA_P256_SHA256" {
-        return Err(error::AppError::UnsupportedAlgorithm);
-    }
-
-    let payload_bytes = STANDARD
-        .decode(&req.payload)
-        .map_err(|_| error::AppError::InvalidPayload)?;
-
-    let signature_bytes = signer.sign(&req.key_id, &payload_bytes).await?;
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    Ok(Json(SignResponse {
-        key_id: req.key_id,
-        algorithm: req.algorithm,
-        signature: STANDARD.encode(signature_bytes),
-        duration_ms,
-    }))
-}
-
-pub async fn healthz() -> &'static str {
-    "ok"
-}
+use crate::crypto::HsmSessionPool;
+use crate::routes::router;
 
 #[tokio::main]
 async fn main() {
@@ -73,10 +24,7 @@ async fn main() {
     );
     let hsm_pool = Arc::new(HsmSessionPool::new(&lib_path, &pin, pool_size));
 
-    let app = Router::new()
-        .route("/v1/sign", post(sign_handler))
-        .route("/healthz", get(healthz))
-        .with_state(hsm_pool);
+    let app = router(hsm_pool);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
     info!("Arkion Signing Service listening on 0.0.0.0:8080");
