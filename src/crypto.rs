@@ -166,3 +166,25 @@ impl Signer for HsmSessionPool {
         Ok(signature)
     }
 }
+
+// Mock implementation for clean substitution
+pub struct MockSigner;
+
+#[async_trait]
+impl Signer for MockSigner {
+    async fn sign(&self, _key_id: &str, _payload: &[u8]) -> Result<Vec<u8>, AppError> {
+        Ok(vec![0x30, 0x44, 0x02, 0x20, 0x7a]) // Mock DER sequence
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_mock_signer() {
+        let signer = MockSigner;
+        let sig = signer.sign("test-key", b"payload").await.unwrap();
+        assert_eq!(sig.len(), 5);
+    }
+}
