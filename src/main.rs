@@ -1,6 +1,7 @@
 mod crypto;
 mod error;
 
+use axum::routing::get;
 use axum::{Json, Router, extract::State, routing::post};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -53,6 +54,10 @@ async fn sign_handler(
     }))
 }
 
+pub async fn healthz() -> &'static str {
+    "ok"
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
@@ -70,10 +75,17 @@ async fn main() {
 
     let app = Router::new()
         .route("/v1/sign", post(sign_handler))
+        .route("/healthz", get(healthz))
         .with_state(hsm_pool);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
     info!("Arkion Signing Service listening on 0.0.0.0:8080");
 
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("shutdown signal received, draining");
+        })
+        .await
+        .unwrap();
 }
